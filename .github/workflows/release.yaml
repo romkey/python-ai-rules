@@ -1,0 +1,213 @@
+name: Release
+
+# main is protected, so releases go through a PR (see docs/releasing.md):
+# 1. Actions tab -> Release -> Run workflow, choosing patch, minor or major.
+#    The prepare job bumps the version on a release/vX.Y.Z branch, opens a
+#    "Release vX.Y.Z" PR, and approves the PR's CI and Lint runs (GitHub
+#    holds runs on PRs opened by a workflow until they're approved).
+# 2. Merge the PR once checks pass. The tag job tags the merge commit and
+#    the release jobs publish it.
+# Pushing a vX.Y.Z tag yourself also works.
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version to bump (minor resets patch; major resets both)"
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+  pull_request:
+    types: [closed]
+    branches: [main]
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+
+permissions:
+  contents: read
+
+# One group per version: the run for a merged release/vX.Y.Z PR and any run
+# for the vX.Y.Z tag share it, so they can't publish the same release at
+# once. The button's runs and unrelated PR closes get groups of their own.
+concurrency:
+  group: >-
+    release-${{ github.event_name == 'push' && format('release/{0}', github.ref_name)
+    || github.event.pull_request.head.ref || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Open release PR
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40  # includes waiting up to 30 minutes for CI
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - name: Only release from main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Run the release from main, not $GITHUB_REF_NAME"
+          exit 1
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # all tags, to find the latest version
+
+      # Merging a PR starts CI on main, so a release right after a merge
+      # waits for that CI rather than failing.
+      - name: Wait for CI to pass on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          state() { gh run list --workflow ci.yaml --limit 1 --json status,conclusion \
+            --jq '.[] | "\(.status) \(.conclusion)"' "$@"; }
+          for i in $(seq 1 90); do  # up to 30 minutes
+            run=$(state --commit "$GITHUB_SHA")
+            case "$run" in "completed "*) break ;; esac
+            # No CI run for this commit after 2 minutes: it didn't run CI.
+            if [ -z "$run" ] && [ "$i" -ge 6 ]; then break; fi
+            if [ "$i" = 1 ]; then echo "Waiting for CI on $GITHUB_SHA to finish..."; fi
+            sleep 20
+          done
+          [ -n "$run" ] || run=$(state --branch main --status completed)
+          if [ "$run" != "completed success" ]; then
+            echo "::error::CI for this commit is '${run:-missing}', not success"
+            exit 1
+          fi
+
+      - name: Bump version on a release branch and open a PR
+        id: pr
+        env:
+          BUMP: ${{ inputs.bump }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(templates/scripts/bump-version.sh "$BUMP")
+          branch="release/v$version"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git commit -am "Release v$version"
+          git push origin "$branch"
+          {
+            echo "Merge to tag and publish **v$version**. Release notes:"
+            echo
+            templates/scripts/changelog-section.sh "$version"
+          } > "$RUNNER_TEMP/body.md"
+          url=$(gh pr create --base main --head "$branch" --title "Release v$version" \
+            --body-file "$RUNNER_TEMP/body.md")
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      # GitHub holds the CI and Lint runs of a PR opened by GITHUB_TOKEN until
+      # someone approves them; the required checks only count those runs.
+      - name: Approve the release PR's CI and Lint runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          URL: ${{ steps.pr.outputs.url }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          held() { gh run list --commit "$sha" --event pull_request --status action_required \
+            --json databaseId,workflowName --jq "$1"; }
+          for _ in $(seq 1 24); do
+            [ "$(held 'length')" -ge 2 ] && break
+            sleep 5
+          done
+          ids=$(held '.[].databaseId')
+          approved=true
+          for id in $ids; do
+            gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/approve" >/dev/null || approved=false
+          done
+          if [ -z "$ids" ] || [ "$approved" != true ]; then
+            echo "::warning::Open $URL and click 'Approve and run workflows' to start CI and Lint"
+          else
+            echo "::notice::Opened $URL; merge it once CI and Lint pass"
+          fi
+
+  tag:
+    name: Tag release
+    if: >-
+      github.event_name == 'pull_request' && github.event.pull_request.merged
+      && startsWith(github.event.pull_request.head.ref, 'release/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+      - id: tag
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          tag="${HEAD_REF#release/}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "$tag"
+          git push origin "$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  release:
+    name: GitHub Release
+    needs: tag
+    # After the tag job, or on its own for a tag pushed by hand. Tags the tag
+    # job pushed are skipped here: that run already publishes them.
+    if: >-
+      !cancelled() && (needs.tag.result == 'success'
+      || (needs.tag.result == 'skipped' && github.event_name == 'push'
+      && github.actor != 'github-actions[bot]'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.tag.outputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+
+      # Idempotent: a second run for the same tag (e.g. if the tag job ever
+      # pushes with a token that triggers workflows) succeeds without
+      # republishing.
+      - name: Skip if already released
+        id: exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::notice::$TAG is already released; nothing to do"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check changelog and plugin version
+        if: steps.exists.outputs.exists != 'true'
+        run: |
+          version="${TAG#v}"
+          templates/scripts/changelog-section.sh "$version" > "$RUNNER_TEMP/notes.md"
+          # The plugin version pins what Claude Code users get.
+          plugin=$(jq -r .version .claude-plugin/plugin.json)
+          if [ "$plugin" != "$version" ]; then
+            echo "::error::.claude-plugin/plugin.json version is $plugin, tag is $TAG"
+            exit 1
+          fi
+          # So does the Agent Skill's.
+          if ! grep -qx "  version: \"$version\"" SKILL.md; then
+            echo "::error::SKILL.md metadata.version doesn't match $TAG"
+            exit 1
+          fi
+
+      - name: Create GitHub Release
+        if: steps.exists.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=""
+          case "$TAG" in *-*) prerelease="--prerelease" ;; esac
+          # The rules as an Agent Skill, for uploading to Claude and others.
+          skill=$(scripts/package-skill.sh "$RUNNER_TEMP/python-ai-rules-skill.zip")
+          gh release create "$TAG" --verify-tag --title "$TAG" \
+            --notes-file "$RUNNER_TEMP/notes.md" $prerelease "$skill"

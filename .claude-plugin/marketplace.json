@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "romkey-python",
+  "owner": {
+    "name": "John Romkey",
+    "url": "https://github.com/romkey"
+  },
+  "description": "romkey's Claude Code plugins for Python applications",
+  "plugins": [
+    {
+      "name": "python-rules",
+      "source": "./",
+      "description": "Scaffold, audit and release Python applications that follow romkey's Python AI coding rules.",
+      "category": "development"
+    }
+  ]
+}
