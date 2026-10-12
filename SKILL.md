@@ -4,7 +4,7 @@ description: romkey's rules for Python applications, with a template project. Us
 license: MIT
 metadata:
   author: John Romkey
-  version: "0.0.0"
+  version: "0.1.0"
   homepage: https://github.com/romkey/python-ai-rules
 ---
 
