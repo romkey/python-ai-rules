@@ -9,7 +9,7 @@
 # The python tag matches .python-version and requires-python in
 # pyproject.toml; change all three together.
 
-FROM python:3.14-slim-trixie AS base
+FROM python:3.15-slim-trixie AS base
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UV_PROJECT_ENVIRONMENT=/venv \
