@@ -9,7 +9,7 @@
 # The python tag matches .python-version and requires-python in
 # pyproject.toml; change all three together.
 
-FROM python:3.14-slim-trixie AS base
+FROM python:3.15-slim-trixie AS base
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UV_PROJECT_ENVIRONMENT=/venv \
@@ -18,7 +18,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 FROM base AS build
-COPY --from=ghcr.io/astral-sh/uv:0.13.0 /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.13.7 /uv /uvx /bin/
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=0
