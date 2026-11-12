@@ -1,6 +1,6 @@
 {
   "name": "python-rules",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "romkey's rules for AI-written Python applications: scaffold, audit and release projects that follow them.",
   "author": {
     "name": "John Romkey",
